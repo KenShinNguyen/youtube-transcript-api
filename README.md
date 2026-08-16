@@ -186,6 +186,12 @@ If you only want one language, you still need to format the `languages` argument
 YouTubeTranscriptApi().fetch(video_id, languages=['de'])
 ```
 
+Language codes are matched exactly first. Only if none of the requested codes matches
+exactly, regional variants are considered, so that requesting `'en'` also finds a
+transcript labelled `'en-US'` (and the other way around). This is a fallback, so an
+exact match for a lower priority language always wins over a regional variant of a
+higher priority one.
+
 ### Preserve formatting
 
 You can also add `preserve_formatting=True` if you'd like to keep HTML formatting elements such as `<i>` (italics) 
@@ -547,6 +553,14 @@ a argument name. For example to get the transcript for the video with the ID `-a
 
 ```
 youtube_transcript_api "\-abc123"
+```
+
+The command exits with status `0` if all requested transcripts were retrieved and with
+status `1` if at least one of them failed, which allows you to detect failures when
+calling it from a script:
+
+```
+youtube_transcript_api <video_id> --format json > transcript.json || echo "failed!"
 ```
 
 ### Working around IP bans using the CLI

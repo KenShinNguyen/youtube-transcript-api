@@ -11,6 +11,11 @@ from ._api import YouTubeTranscriptApi, FetchedTranscript, TranscriptList
 class YouTubeTranscriptCli:
     def __init__(self, args: List[str]):
         self._args = args
+        self.exceptions: List[Exception] = []
+        """
+        The errors raised for the video IDs that could not be retrieved during the
+        last `run()`. Used to determine the exit code of the command.
+        """
 
     def run(self) -> str:
         parsed_args = self._parse_args()
@@ -35,7 +40,7 @@ class YouTubeTranscriptCli:
             )
 
         transcripts = []
-        exceptions = []
+        self.exceptions = exceptions = []
 
         ytt_api = YouTubeTranscriptApi(
             proxy_config=proxy_config,

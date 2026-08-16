@@ -6,6 +6,7 @@ from html import unescape
 from typing import List, Dict, Iterator, Iterable, Pattern, Optional
 
 from defusedxml import ElementTree
+from xml.etree.ElementTree import ParseError
 
 import re
 
@@ -90,6 +91,20 @@ class _PlayabilityFailedReason(str, Enum):
     VIDEO_UNAVAILABLE = "This video is unavailable"
 
 
+def _extract_text(text_object: Dict) -> str:
+    """
+    Extracts the string out of one of YouTube's text objects.
+
+    Depending on the client and the endpoint that served the response, YouTube
+    represents a display string either as a list of `runs` or as a plain `simpleText`,
+    so both variants have to be supported.
+    """
+    runs = text_object.get("runs")
+    if runs is None:
+        return text_object["simpleText"]
+    return "".join(run["text"] for run in runs)
+
+
 def _raise_http_errors(response: Response, video_id: str) -> Response:
     try:
         if response.status_code == 429:
@@ -135,9 +150,12 @@ class Transcript:
         if "&exp=xpe" in self._url:
             raise PoTokenRequired(self.video_id)
         response = self._http_client.get(self._url)
-        snippets = _TranscriptParser(preserve_formatting=preserve_formatting).parse(
-            _raise_http_errors(response, self.video_id).text,
-        )
+        try:
+            snippets = _TranscriptParser(preserve_formatting=preserve_formatting).parse(
+                _raise_http_errors(response, self.video_id).text,
+            )
+        except (ParseError, KeyError, ValueError) as cause:
+            raise YouTubeDataUnparsable(self.video_id) from cause
         return FetchedTranscript(
             snippets=snippets,
             video_id=self.video_id,
@@ -214,33 +232,42 @@ class TranscriptList:
         :param video_id: the id of the video this TranscriptList is for
         :param captions_json: the JSON parsed from the YouTube pages static HTML
         :return: the created TranscriptList
+        :raises YouTubeDataUnparsable: if the given JSON doesn't have the structure
+            this library expects
         """
-        translation_languages = [
-            _TranslationLanguage(
-                language=translation_language["languageName"]["runs"][0]["text"],
-                language_code=translation_language["languageCode"],
-            )
-            for translation_language in captions_json.get("translationLanguages", [])
-        ]
+        try:
+            translation_languages = [
+                _TranslationLanguage(
+                    language=_extract_text(translation_language["languageName"]),
+                    language_code=translation_language["languageCode"],
+                )
+                for translation_language in captions_json.get(
+                    "translationLanguages", []
+                )
+            ]
 
-        manually_created_transcripts = {}
-        generated_transcripts = {}
+            manually_created_transcripts = {}
+            generated_transcripts = {}
 
-        for caption in captions_json["captionTracks"]:
-            if caption.get("kind", "") == "asr":
-                transcript_dict = generated_transcripts
-            else:
-                transcript_dict = manually_created_transcripts
+            for caption in captions_json["captionTracks"]:
+                if caption.get("kind", "") == "asr":
+                    transcript_dict = generated_transcripts
+                else:
+                    transcript_dict = manually_created_transcripts
 
-            transcript_dict[caption["languageCode"]] = Transcript(
-                http_client,
-                video_id,
-                caption["baseUrl"].replace("&fmt=srv3", ""),
-                caption["name"]["runs"][0]["text"],
-                caption["languageCode"],
-                caption.get("kind", "") == "asr",
-                translation_languages if caption.get("isTranslatable", False) else [],
-            )
+                transcript_dict[caption["languageCode"]] = Transcript(
+                    http_client,
+                    video_id,
+                    caption["baseUrl"].replace("&fmt=srv3", ""),
+                    _extract_text(caption["name"]),
+                    caption["languageCode"],
+                    caption.get("kind", "") == "asr",
+                    translation_languages
+                    if caption.get("isTranslatable", False)
+                    else [],
+                )
+        except (KeyError, IndexError, TypeError, AttributeError) as cause:
+            raise YouTubeDataUnparsable(video_id) from cause
 
         return TranscriptList(
             video_id,
@@ -302,12 +329,30 @@ class TranscriptList:
         language_codes: Iterable[str],
         transcript_dicts: List[Dict[str, Transcript]],
     ) -> Transcript:
+        # Materialized, as `language_codes` may be a single-pass iterable, which the
+        # exact match pass below would otherwise exhaust.
+        language_codes = list(language_codes)
+
         for language_code in language_codes:
             for transcript_dict in transcript_dicts:
                 if language_code in transcript_dict:
                     return transcript_dict[language_code]
 
+        # Only once no exact match has been found at all, regional variants are
+        # considered, so that requesting "en" also matches "en-US" (and vice versa).
+        # YouTube isn't consistent about which of the two it uses for a given video.
+        for language_code in language_codes:
+            base_language = self._base_language(language_code)
+            for transcript_dict in transcript_dicts:
+                for transcript in transcript_dict.values():
+                    if self._base_language(transcript.language_code) == base_language:
+                        return transcript
+
         raise NoTranscriptFound(self.video_id, language_codes, self)
+
+    @staticmethod
+    def _base_language(language_code: str) -> str:
+        return language_code.split("-")[0].lower()
 
     def __str__(self) -> str:
         return (

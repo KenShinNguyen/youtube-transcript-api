@@ -1,4 +1,5 @@
 import pytest
+import json
 import os
 from pathlib import Path
 from unittest import TestCase
@@ -27,6 +28,7 @@ from youtube_transcript_api import (
     RequestBlocked,
     VideoUnplayable,
     PoTokenRequired,
+    YouTubeDataUnparsable,
 )
 from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
 
@@ -42,6 +44,10 @@ def get_asset_path(filename: str) -> Path:
 def load_asset(filename: str):
     with open(get_asset_path(filename), mode="rb") as file:
         return file.read()
+
+
+def load_json_asset(filename: str):
+    return json.loads(load_asset(filename))
 
 
 class TestYouTubeTranscriptApi(TestCase):
@@ -204,6 +210,120 @@ class TestYouTubeTranscriptApi(TestCase):
         self.assertIn("lang", query_string)
         self.assertEqual(len(query_string["lang"]), 1)
         self.assertEqual(query_string["lang"][0], "en")
+
+    def _replace_captions_json(self, captions_json):
+        innertube_data = load_json_asset("youtube.innertube.json.static")
+        innertube_data["captions"]["playerCaptionsTracklistRenderer"] = captions_json
+        responses.replace(
+            responses.POST,
+            "https://www.youtube.com/youtubei/v1/player",
+            body=json.dumps(innertube_data),
+            content_type="application/json",
+        )
+
+    def _replace_caption_tracks(self, caption_tracks):
+        self._replace_captions_json({"captionTracks": caption_tracks})
+
+    def test_list__regional_variant_is_used_as_fallback(self):
+        self._replace_caption_tracks(
+            [
+                {
+                    "baseUrl": "https://www.youtube.com/api/timedtext?lang=en-US",
+                    "name": {"runs": [{"text": "English (United States)"}]},
+                    "languageCode": "en-US",
+                }
+            ]
+        )
+
+        transcript = YouTubeTranscriptApi().list("GJLlxj_dtq8").find_transcript(["en"])
+
+        self.assertEqual(transcript.language_code, "en-US")
+
+    def test_list__regional_variant_is_matched_against_base_language(self):
+        transcript = (
+            YouTubeTranscriptApi().list("GJLlxj_dtq8").find_transcript(["en-GB"])
+        )
+
+        self.assertEqual(transcript.language_code, "en")
+
+    def test_list__exact_match_takes_precedence_over_regional_variant(self):
+        self._replace_caption_tracks(
+            [
+                {
+                    "baseUrl": "https://www.youtube.com/api/timedtext?lang=en-US",
+                    "name": {"runs": [{"text": "English (United States)"}]},
+                    "languageCode": "en-US",
+                },
+                {
+                    "baseUrl": "https://www.youtube.com/api/timedtext?lang=de",
+                    "name": {"runs": [{"text": "German"}]},
+                    "languageCode": "de",
+                },
+            ]
+        )
+
+        transcript = (
+            YouTubeTranscriptApi().list("GJLlxj_dtq8").find_transcript(["en-GB", "de"])
+        )
+
+        self.assertEqual(transcript.language_code, "de")
+
+    def test_list__language_codes_can_be_a_single_pass_iterable(self):
+        transcript_list = YouTubeTranscriptApi().list("GJLlxj_dtq8")
+
+        with self.assertRaises(NoTranscriptFound):
+            transcript_list.find_transcript(iter(["xyz"]))
+
+    def test_list__simple_text_language_names(self):
+        self._replace_captions_json(
+            {
+                "captionTracks": [
+                    {
+                        "baseUrl": "https://www.youtube.com/api/timedtext?lang=en",
+                        "name": {"simpleText": "English"},
+                        "languageCode": "en",
+                        "isTranslatable": True,
+                    }
+                ],
+                "translationLanguages": [
+                    {
+                        "languageCode": "de",
+                        "languageName": {"simpleText": "German"},
+                    }
+                ],
+            }
+        )
+
+        transcript = YouTubeTranscriptApi().list("GJLlxj_dtq8").find_transcript(["en"])
+
+        self.assertEqual(transcript.language, "English")
+        self.assertEqual(transcript.translation_languages[0].language, "German")
+
+    def test_list__exception_if_caption_data_unparsable(self):
+        self._replace_caption_tracks([{"languageCode": "en"}])
+
+        with self.assertRaises(YouTubeDataUnparsable):
+            YouTubeTranscriptApi().list("GJLlxj_dtq8")
+
+    def test_fetch__exception_if_transcript_data_unparsable(self):
+        responses.replace(
+            responses.GET,
+            "https://www.youtube.com/api/timedtext",
+            body="this is not xml",
+        )
+
+        with self.assertRaises(YouTubeDataUnparsable):
+            YouTubeTranscriptApi().fetch("GJLlxj_dtq8")
+
+    def test_fetch__exception_if_transcript_timestamps_unparsable(self):
+        responses.replace(
+            responses.GET,
+            "https://www.youtube.com/api/timedtext",
+            body='<transcript><text dur="1.0">no start attribute</text></transcript>',
+        )
+
+        with self.assertRaises(YouTubeDataUnparsable):
+            YouTubeTranscriptApi().fetch("GJLlxj_dtq8")
 
     def test_fetch__create_consent_cookie_if_needed(self):
         responses.replace(

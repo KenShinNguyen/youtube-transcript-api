@@ -246,9 +246,17 @@ class TestYouTubeTranscriptCli(TestCase):
     def test_run__failing_transcripts(self):
         YouTubeTranscriptApi.list = MagicMock(side_effect=VideoUnavailable("video_id"))
 
-        output = YouTubeTranscriptCli("v1 --languages de en".split()).run()
+        cli = YouTubeTranscriptCli("v1 --languages de en".split())
+        output = cli.run()
 
         self.assertEqual(output, str(VideoUnavailable("video_id")))
+        self.assertEqual(len(cli.exceptions), 1)
+
+    def test_run__no_exceptions_when_successful(self):
+        cli = YouTubeTranscriptCli("v1 v2 --languages de en".split())
+        cli.run()
+
+        self.assertEqual(cli.exceptions, [])
 
     def test_run__exclude_generated(self):
         YouTubeTranscriptCli(

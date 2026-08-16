@@ -79,6 +79,38 @@ class TestFormatters(TestCase):
             formatted_single_transcript + "\n\n\n" + formatted_single_transcript,
         )
 
+    def test_srt_formatter_rounds_to_whole_milliseconds(self):
+        transcript = FetchedTranscript(
+            snippets=[
+                # A start time that is just short of the next full second must not
+                # be rendered as an invalid '00:00:01,1000'.
+                FetchedTranscriptSnippet(text="rounded", start=1.9999, duration=1.0),
+            ],
+            language="English",
+            language_code="en",
+            is_generated=True,
+            video_id="12345",
+        )
+
+        content = SRTFormatter().format_transcript(transcript)
+
+        self.assertEqual(content.split("\n")[1], "00:00:02,000 --> 00:00:03,000")
+
+    def test_srt_formatter_long_timestamps(self):
+        transcript = FetchedTranscript(
+            snippets=[
+                FetchedTranscriptSnippet(text="late", start=3661.5, duration=1.25),
+            ],
+            language="English",
+            language_code="en",
+            is_generated=True,
+            video_id="12345",
+        )
+
+        content = SRTFormatter().format_transcript(transcript)
+
+        self.assertEqual(content.split("\n")[1], "01:01:01,500 --> 01:01:02,750")
+
     def test_webvtt_formatter_starting(self):
         content = WebVTTFormatter().format_transcript(self.transcript)
         lines = content.split("\n")
